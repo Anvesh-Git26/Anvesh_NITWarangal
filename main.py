@@ -231,7 +231,7 @@ async def extract_bill_data(request: InvoiceRequest):
     
     try:
         # A. Download (Added User-Agent for robustness against servers like HackRx blob storage)
-        headers = {'User-Agent': 'Mozilla/5.0'}
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.75 Safari/537.36'}
         response = requests.get(request.document, headers=headers, stream=True, timeout=15)
         if response.status_code != 200:
             raise HTTPException(status_code=400, detail=f"Download failed: Status {response.status_code}")
@@ -293,3 +293,4 @@ async def extract_bill_data(request: InvoiceRequest):
         if os.path.exists(temp_filename):
             os.remove(temp_filename)
             
+
