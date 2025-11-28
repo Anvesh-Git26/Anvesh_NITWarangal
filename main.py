@@ -58,14 +58,31 @@ def detect_fraud_advanced(image_path):
         logger.error(f"Fraud check failed: {e}")
         return {"fraud_score": 0, "tampering_detected": False}
 
-# --- 2. LOGIC ENGINE LOGIC (Math Verification) ---
+# --- 2. LOGIC ENGINE LOGIC (Math Verification & Tax/Discount) ---
+
 ITEM_TOLERANCE = 1.0
 
+def classify_row(description):
+    """Classifies a row into semantic types: ITEM, TAX, DISCOUNT, or ADJUSTMENT."""
+    desc = description.lower()
+    if any(x in desc for x in ['discount', 'rebate', 'less', 'coupon']):
+        return "DISCOUNT"
+    if any(x in desc for x in ['tax', 'gst', 'vat', 'cgst', 'sgst', 'igst', 'cess']):
+        return "TAX"
+    if any(x in desc for x in ['round', 'adjustment', 'fee', 'charge']):
+        return "ADJUSTMENT"
+    return "ITEM"
+
 def verify_and_reconcile(extracted_data):
-    # This logic handles item filtering, math verification, and total calculation
     lines = extracted_data.get("pagewise_line_items", [])
-    total_count = 0
-    calculated_total = 0.0
+    
+    # Financial Trackers
+    total_items_sum = 0.0
+    total_tax_sum = 0.0
+    total_discount_sum = 0.0
+    total_adjustment_sum = 0.0
+
+    total_item_count = 0
     
     # Helper to clean strings into floats
     def clean_money(val):
@@ -79,43 +96,75 @@ def verify_and_reconcile(extracted_data):
         valid_items = []
         for item in page.get("bill_items", []):
             try:
+                # Load values
+                desc = item.get("item_name", "")
                 q = clean_money(item.get("item_quantity", 0))
                 r = clean_money(item.get("item_rate", 0))
                 a = clean_money(item.get("item_amount", 0))
             except: q, r, a = 0.0, 0.0, 0.0
 
-            # Trap 1: Lump Sum (Qty=0, Rate=0, Amount>0)
-            if q == 0 and r == 0 and a > 0:
-                q = 1.0
-                r = a
+            row_type = classify_row(desc)
+
+            # --- HEADER/TOTAL FILTER (Sample 1 Filter) ---
+            if row_type == "ITEM" and q <= 1.0 and r == 0.0 and a > 100.0 and any(k in desc for k in ["charges", "services", "care", "particulars"]):
+                # This is likely a category header. Skip.
+                continue
+
+            # --- ACCOUNTING & MATH LOGIC ---
+
+            if row_type == "ITEM":
+                # Trap 1: Lump Sum
+                if q == 0 and r == 0 and a > 0:
+                    q = 1.0
+                    r = a
+                
+                # Trap 2: Math Verification (Corrects OCR mistakes in Amount)
+                if q > 0 and r > 0:
+                    math_normal = round(q * r, 2)
+                    if abs(math_normal - a) > ITEM_TOLERANCE:
+                        # Check for Swap Trap (Qty * Amount == Rate)
+                        if a > 0 and abs((q * a) - r) <= ITEM_TOLERANCE:
+                            temp = r
+                            r = a
+                            a = temp
+                        else:
+                            a = math_normal # Trust Math
+                
+                total_items_sum += a
+                total_item_count += 1
             
-            # Trap 2: Math Verification (Checks for normal error AND column swap error)
-            if q > 0 and r > 0:
-                math_normal = round(q * r, 2)
-                if abs(math_normal - a) > ITEM_TOLERANCE:
-                    # Check for Swap Trap (Qty * Amount == Rate)
-                    if a > 0 and abs((q * a) - r) <= ITEM_TOLERANCE:
-                        temp = r
-                        r = a
-                        a = temp
-                    else:
-                        a = math_normal # Trust Math
-            
+            # Summing Components (For Final Reconciliation)
+            elif row_type == "TAX":
+                total_tax_sum += a
+            elif row_type == "DISCOUNT":
+                total_discount_sum += abs(a) # Subtract absolute value later
+            elif row_type == "ADJUSTMENT":
+                total_adjustment_sum += a
+
             # Update item with final reconciled values
             item['item_quantity'] = q
             item['item_rate'] = r
             item['item_amount'] = a
+            item['row_type'] = row_type # Add debug info
+            
             valid_items.append(item)
-            calculated_total += a
-            total_count += 1
             
         page['bill_items'] = valid_items
 
+    # --- FINAL RECONCILIATION ---
+    final_reconciled_sum = (
+        total_items_sum
+        + total_tax_sum
+        + total_adjustment_sum
+        - total_discount_sum
+    )
+
     return {
         "pagewise_line_items": lines,
-        "total_item_count": total_count,
-        "reconciled_amount": round(calculated_total, 2)
+        "total_item_count": total_item_count,
+        "reconciled_amount": round(final_reconciled_sum, 2)
     }
+
 
 # --- 3. ROBUST GEMINI CALLER (FINAL WORKING MODEL) ---
 def call_gemini_safe(file_ref, prompt):
@@ -174,7 +223,6 @@ def call_gemini_safe(file_ref, prompt):
 
 @app.get("/")
 def health_check():
-    # Simple health check endpoint for Render
     return {"status": "online", "service": "BFHL Invoice Extractor"}
 
 @app.post("/extract-bill-data")
@@ -220,7 +268,7 @@ async def extract_bill_data(request: InvoiceRequest):
         except:
             token_data = {"total_tokens": 0, "input_tokens": 0, "output_tokens": 0}
 
-        # E. Logic Engine
+        # E. Logic Engine (Now includes Tax/Discount handling)
         clean_data = verify_and_reconcile(raw_data)
         
         # F. Final Response Construction
@@ -244,3 +292,4 @@ async def extract_bill_data(request: InvoiceRequest):
     finally:
         if os.path.exists(temp_filename):
             os.remove(temp_filename)
+            
