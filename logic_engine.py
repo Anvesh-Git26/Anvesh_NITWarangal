@@ -13,6 +13,8 @@ def clean_money(val):
 def is_header_or_total(desc, qty, rate, amount):
     desc = desc.lower()
     if any(x in desc for x in ["total", "sum", "gross", "net", "amount in words"]): return True
+    
+    # Heuristic for Category Headers
     if qty <= 1 and rate == 0 and amount > 100:
         if any(x in desc for x in ["charges", "services", "care", "fee", "particulars"]):
             return True
@@ -20,6 +22,7 @@ def is_header_or_total(desc, qty, rate, amount):
 
 def verify_and_reconcile(extracted_data):
     lines = extracted_data.get("pagewise_line_items", [])
+    
     total_count = 0
     calculated_total = 0.0
     
@@ -31,21 +34,29 @@ def verify_and_reconcile(extracted_data):
             r = clean_money(item.get("item_rate", 0))
             a = clean_money(item.get("item_amount", 0))
             
-            if is_header_or_total(desc, q, r, a): continue
+            # --- TRAP FIX 1: Headers & Totals ---
+            if is_header_or_total(desc, q, r, a):
+                continue
 
-            # Trap Fix: Column Swap
+            # --- TRAP FIX 2: Column Swap ---
             if q > 0 and r > 0 and a > 0:
                 math_normal = round(q * r, 2)
                 if abs(math_normal - a) > ITEM_TOLERANCE:
                     if abs((q * a) - r) <= ITEM_TOLERANCE:
-                        temp = r; r = a; a = temp
+                        temp = r
+                        r = a
+                        a = temp
 
-            # Math Verification
+            # --- LOGIC & MATH RECONCILIATION ---
             if q > 0 and r > 0:
                 math_a = round(q * r, 2)
-                if abs(math_a - a) > ITEM_TOLERANCE: a = math_a 
+                if abs(math_a - a) > ITEM_TOLERANCE:
+                    a = math_a 
+            elif q > 0 and r == 0 and a > 0:
+                r = round(a / q, 2)
             elif q == 0 and r == 0 and a > 0:
-                q = 1; r = a
+                q = 1
+                r = a
             
             item['item_quantity'] = q
             item['item_rate'] = r
