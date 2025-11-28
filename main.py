@@ -58,7 +58,7 @@ async def extract_bill_data(request: InvoiceRequest):
         
         # 3. Gemini Extraction (Visual Layer)
         logger.info("Sending to Gemini...")
-        model = genai.GenerativeModel("gemini-1.5-flash", generation_config={
+        model = genai.GenerativeModel("gemini-1.5-flash-002", generation_config={
             "response_mime_type": "application/json",
             "response_schema": {
                 "type": "OBJECT",
@@ -155,3 +155,4 @@ async def extract_bill_data(request: InvoiceRequest):
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=10000)
+
