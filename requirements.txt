@@ -1,10 +1,8 @@
 fastapi
 uvicorn
 requests
-# Ensure stable OpenCV version that reduces Linux dependency issues
-opencv-python-headless==4.8.0.76
-numpy
+opencv-python-headless==4.8.0.76  # Keeping this specific version for stability
+numpy<2.0.0,>=1.26.0               # <--- NEW: Forces NumPy 1.x compatibility
 google-generativeai>=0.8.3
 python-dotenv
 pydantic
-
