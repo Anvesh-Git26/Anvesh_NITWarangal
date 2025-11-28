@@ -5,11 +5,12 @@ FROM python:3.13-slim
 WORKDIR /usr/src/app
 
 # Install necessary system dependencies for OpenCV (The Fix for the Read-Only Error)
+# Install necessary system dependencies for OpenCV and COMPILERS (The Final Fix)
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
+    build-essential gfortran \
     libsm6 libxext6 libxrender1 libfontconfig1 libice6 \
     && rm -rf /var/lib/apt/lists/*
-
 # Install Python dependencies
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
