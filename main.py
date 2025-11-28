@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 import google.generativeai as genai
 
-# Custom modules (make sure fraud_engine.py and logic_engine.py are in the repo)
+# Custom modules
 from fraud_engine import detect_fraud_advanced
 from logic_engine import verify_and_reconcile
 
@@ -37,23 +37,32 @@ async def extract_bill_data(request: InvoiceRequest):
     temp_filename = "temp_invoice.jpg"
     
     try:
-        # 1. Download File from URL
+        # 1. Download File (FIXED: Added Headers to look like a Browser)
         logger.info(f"Downloading from {request.document}")
-        response = requests.get(request.document, stream=True, timeout=15)
+        
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        }
+        
+        response = requests.get(request.document, headers=headers, stream=True, timeout=15)
+        
         if response.status_code != 200:
+            logger.error(f"Download failed with status {response.status_code}")
             raise HTTPException(status_code=400, detail="Failed to download image")
             
         with open(temp_filename, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
                 f.write(chunk)
                 
-        # 2. Fraud Check (Forensic Layer)
+        # 2. Fraud Check
         logger.info("Running Fraud Check...")
         fraud_data = detect_fraud_advanced(temp_filename)
         
-        # 3. Gemini Extraction (Visual Layer)
+        # 3. Gemini Extraction (FIXED: Changed Model Name)
         logger.info("Sending to Gemini...")
-        model = genai.GenerativeModel("gemini-1.5-flash", generation_config={
+        
+        # We switched to 'gemini-1.5-flash-001' which is more stable
+        model = genai.GenerativeModel("gemini-1.5-flash-001", generation_config={
             "response_mime_type": "application/json",
             "response_schema": {
                 "type": "OBJECT",
@@ -100,7 +109,7 @@ async def extract_bill_data(request: InvoiceRequest):
         except:
             raw_data = {"pagewise_line_items": []}
         
-        # 4. Logic Engine (Math Verification Layer)
+        # 4. Logic Engine
         logger.info("Running Logic Engine...")
         clean_data = verify_and_reconcile(raw_data)
         
@@ -116,6 +125,7 @@ async def extract_bill_data(request: InvoiceRequest):
 
     except Exception as e:
         logger.error(f"Error: {str(e)}")
+        # Return False but keep structure valid
         return {
             "is_success": False,
             "data": {
@@ -125,6 +135,5 @@ async def extract_bill_data(request: InvoiceRequest):
             }
         }
     finally:
-        # Cleanup
         if os.path.exists(temp_filename):
             os.remove(temp_filename)
