@@ -138,7 +138,7 @@ async def extract_bill_data(request: InvoiceRequest):
         
         # C. Gemini Extraction
         logger.info("Calling Gemini...")
-        model = genai.GenerativeModel("gemini-1.5-flash", generation_config={
+        model = genai.GenerativeModel("gemini-1.5-pro", generation_config={
             "response_mime_type": "application/json",
             "response_schema": {
                 "type": "OBJECT",
@@ -218,3 +218,4 @@ async def extract_bill_data(request: InvoiceRequest):
     finally:
         if os.path.exists(temp_filename):
             os.remove(temp_filename)
+
