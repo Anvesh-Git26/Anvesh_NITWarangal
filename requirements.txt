@@ -1,8 +1,8 @@
 fastapi
-uvicorn
+uvicorn[standard]
+google-generativeai
 requests
-opencv-python-headless==4.8.0.76  # Use a specific, stable version for compatibility
-numpy==1.26.4                     # Pin this version to avoid compilation issues
-google-generativeai>=0.8.3
 python-dotenv
-pydantic
+opencv-python-headless
+numpy
+Pillow
