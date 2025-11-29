@@ -1,28 +1,12 @@
-# Use a robust Python base image
-FROM python:3.13-slim
+FROM python:3.11-slim
 
-# Set working directory
-WORKDIR /usr/src/app
+WORKDIR /app
 
-# Install necessary system dependencies for OpenCV (The Fix for the Read-Only Error)
-# Install necessary system dependencies for OpenCV and COMPILERS (The Final Fix)
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-    build-essential gfortran \
-    libsm6 libxext6 libxrender1 libfontconfig1 libice6 \
-    && rm -rf /var/lib/apt/lists/*
-# Install Python dependencies
-COPY requirements.txt ./
+COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
 COPY . .
 
-# Environment variable for the port Render requires
-ENV PORT 10000
+ENV PORT=8000
 
-# Expose the port
-EXPOSE 10000
-
-# Start the application
-CMD python -m uvicorn main:app --host 0.0.0.0 --port $PORT
+CMD ["bash", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"]
