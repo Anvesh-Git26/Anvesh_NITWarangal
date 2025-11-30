@@ -1,8 +1,6 @@
-fastapi==0.109.0
-uvicorn==0.27.0
-requests==2.31.0
-opencv-python-headless==4.8.0.76
-numpy==1.26.4
-google-generativeai>=0.8.3
-python-dotenv==1.0.0
-pydantic==2.6.0
+fastapi
+uvicorn
+requests
+google-generativeai
+python-dotenv
+pydantic
