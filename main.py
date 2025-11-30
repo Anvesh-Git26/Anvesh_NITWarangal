@@ -267,4 +267,3 @@ async def extract_bill_data(request: InvoiceRequest):
     finally:
         if os.path.exists(temp_filename): os.remove(temp_filename)
         if os.path.exists("temp_ela.jpg"): os.remove("temp_ela.jpg")
-            
