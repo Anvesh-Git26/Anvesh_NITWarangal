@@ -1,228 +1,287 @@
 import os
-import json
-import tempfile
-import mimetypes
-from typing import Any, Dict, List, Optional
-
+import uvicorn
 import requests
+import json
+import logging
+import cv2
+import numpy as np
+import re
+import shutil
+import mimetypes
 from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-
+from dotenv import load_dotenv
 import google.generativeai as genai
 
+# --- CONFIGURATION ---
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# -----------------------------
-# FastAPI app setup
-# -----------------------------
-app = FastAPI(title="Datathon Bill Extraction API")
+load_dotenv()
+api_key = os.getenv("GOOGLE_API_KEY")
+if not api_key:
+    logger.warning("GOOGLE_API_KEY not found!")
+else:
+    genai.configure(api_key=api_key)
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app = FastAPI()
 
-
-# -----------------------------
-# Request model
-# -----------------------------
 class InvoiceRequest(BaseModel):
-    document: Any
+    document: str
 
-
-# -----------------------------
-# Extract URL helper
-# -----------------------------
-def extract_url(document: Any) -> str:
-    if isinstance(document, str) and document.startswith(("http://", "https://")):
-        return document
-
-    if isinstance(document, dict):
-        for k in ("document", "url", "link", "href"):
-            v = document.get(k)
-            if isinstance(v, str) and v.startswith(("http://", "https://")):
-                return v
-        for v in document.values():
-            if isinstance(v, (dict, list, str)):
-                try:
-                    return extract_url(v)
-                except Exception:
-                    pass
-
-    if isinstance(document, list):
-        for v in document:
-            try:
-                return extract_url(v)
-            except Exception:
-                pass
-
-    raise HTTPException(status_code=400, detail="No valid URL in document")
-
-
-# -----------------------------
-# Download file helper
-# -----------------------------
-def download_file(url: str) -> str:
-    headers = {"User-Agent": "Mozilla/5.0"}
+# --- 1. FRAUD ENGINE (PDF Safe) ---
+def detect_fraud_advanced(image_path):
+    # ELA only works on image files. If PDF, we must skip to prevent crash.
+    # The training samples contain PDFs, so this check is MANDATORY.
+    if image_path.lower().endswith('.pdf'):
+        logger.info("Skipping Fraud Check for PDF document.")
+        return {"fraud_score": 0, "tampering_detected": False}
+        
     try:
-        r = requests.get(url, headers=headers, stream=True, timeout=60)
+        orig = cv2.imread(image_path)
+        if orig is None: return {"fraud_score": 0, "tampering_detected": False}
+        
+        cv2.imwrite("temp_ela.jpg", orig, [cv2.IMWRITE_JPEG_QUALITY, 90])
+        compressed = cv2.imread("temp_ela.jpg")
+        
+        diff = cv2.absdiff(orig, compressed)
+        diff = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
+        
+        flattened = diff.flatten()
+        flattened.sort()
+        top_5_percent = int(len(flattened) * 0.05)
+        
+        if top_5_percent > 0:
+            robust_score = np.mean(flattened[-top_5_percent:])
+        else:
+            robust_score = 0
+            
+        return {"fraud_score": round(float(robust_score), 2), "tampering_detected": bool(robust_score > 15.0)}
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        logger.error(f"Fraud check failed: {e}")
+        return {"fraud_score": 0, "tampering_detected": False}
 
-    if r.status_code != 200:
-        raise HTTPException(status_code=400, detail=f"Download failed: {r.status_code}")
+# --- 2. LOGIC ENGINE (Accounting & Math) ---
+ITEM_TOLERANCE = 1.0
 
-    content_type = r.headers.get("Content-Type", "").split(";")[0].lower()
+def classify_row(description):
+    """Classifies rows to ensure Taxes are added and Discounts subtracted."""
+    desc = description.lower()
+    if any(x in desc for x in ['discount', 'rebate', 'less', 'coupon', 'off']): return "DISCOUNT"
+    if any(x in desc for x in ['tax', 'gst', 'vat', 'cgst', 'sgst', 'igst', 'cess']): return "TAX"
+    if any(x in desc for x in ['round', 'adjustment', 'fee', 'charge', 'deposit', 'balance']): return "ADJUSTMENT"
+    return "ITEM"
 
-    if content_type == "application/pdf":
-        suffix = ".pdf"
-    elif "png" in content_type:
-        suffix = ".png"
-    elif "jpeg" in content_type or "jpg" in content_type:
-        suffix = ".jpg"
-    else:
-        suffix = mimetypes.guess_extension(content_type) or ".bin"
-
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
-    for chunk in r.iter_content(8192):
-        if chunk:
-            tmp.write(chunk)
-    tmp.close()
-    return tmp.name
-
-
-# -----------------------------
-# Normalize item floats
-# -----------------------------
-def f(x):
+def clean_money(val):
+    if isinstance(val, (int, float)): return float(val)
     try:
-        if x is None:
-            return 0.0
-        return float(str(x).replace(",", "").strip())
+        return float(str(val).replace(",", "").replace("Rs.", "").replace("$", "").strip())
     except:
         return 0.0
 
+def verify_and_reconcile(extracted_data):
+    lines = extracted_data.get("pagewise_line_items", [])
+    
+    total_items_sum = 0.0
+    total_tax_sum = 0.0
+    total_discount_sum = 0.0
+    total_adjustment_sum = 0.0
+    total_item_count = 0
+    
+    for page in lines:
+        valid_items = []
+        for item in page.get("bill_items", []):
+            try:
+                desc = item.get("item_name", "")
+                q = clean_money(item.get("item_quantity", 0))
+                r = clean_money(item.get("item_rate", 0))
+                a = clean_money(item.get("item_amount", 0))
+            except: q, r, a = 0.0, 0.0, 0.0
 
-# -----------------------------
-# Gemini setup - Gemini 2.0 Flash
-# -----------------------------
-API_KEY = os.getenv("GOOGLE_API_KEY")
-if not API_KEY:
-    raise RuntimeError("GOOGLE_API_KEY is not set!")
+            row_type = classify_row(desc)
 
-genai.configure(api_key=API_KEY)
+            # FILTER: Ignore Generic Headers (Sample 1 Fix)
+            if row_type == "ITEM" and q <= 1.0 and r == 0.0 and a > 100.0 and any(k in desc for k in ["charges", "services", "care", "particulars"]):
+                continue
 
-model = genai.GenerativeModel(
-    "gemini-2.0-flash",
-    generation_config={
-        "temperature": 0.0,
-        "max_output_tokens": 3000,
+            if row_type == "ITEM":
+                # Trap 1: Lump Sum
+                if q == 0 and r == 0 and a > 0:
+                    q, r = 1.0, a
+                
+                # Trap 2: Math Verification
+                if q > 0 and r > 0:
+                    math_normal = round(q * r, 2)
+                    if abs(math_normal - a) > ITEM_TOLERANCE:
+                        # Check for Swap Trap
+                        if a > 0 and abs((q * a) - r) <= ITEM_TOLERANCE:
+                            temp = r
+                            r = a
+                            a = temp
+                        else:
+                            a = math_normal 
+                
+                total_items_sum += a
+                total_item_count += 1
+            
+            elif row_type == "TAX": total_tax_sum += a
+            elif row_type == "DISCOUNT": total_discount_sum += abs(a)
+            elif row_type == "ADJUSTMENT": total_adjustment_sum += a
+
+            item['item_quantity'] = q
+            item['item_rate'] = r
+            item['item_amount'] = a
+            
+            valid_items.append(item)
+        page['bill_items'] = valid_items
+
+    # FINAL RECONCILIATION
+    final_reconciled_sum = (total_items_sum + total_tax_sum + total_adjustment_sum - total_discount_sum)
+
+    return {
+        "pagewise_line_items": lines,
+        "total_item_count": total_item_count,
+        "reconciled_amount": round(final_reconciled_sum, 2)
+    }
+
+# --- 3. ROBUST GEMINI CALLER (Updated Models) ---
+def call_gemini_safe(file_ref, prompt):
+    # UPDATED LIST: Removed 1.5-flash because your environment rejected it.
+    # We prioritize 2.0-flash which you verified in Colab.
+    models_to_try = [
+        "gemini-2.0-flash",       # Primary Winner
+        "gemini-2.5-flash",       # Secondary
+        "gemini-flash-latest",    # Fallback
+        "gemini-2.0-flash-exp"    # Experimental Fallback
+    ]
+    
+    generation_config = {
         "response_mime_type": "application/json",
+        "response_schema": {
+            "type": "OBJECT",
+            "properties": {
+                "pagewise_line_items": {
+                    "type": "ARRAY",
+                    "items": {
+                        "type": "OBJECT",
+                        "properties": {
+                            "page_no": {"type": "STRING"},
+                            "page_type": {"type": "STRING", "enum": ["Bill Detail", "Final Bill", "Pharmacy"]},
+                            "bill_items": {
+                                "type": "ARRAY",
+                                "items": {
+                                    "type": "OBJECT",
+                                    "properties": {
+                                        "item_name": {"type": "STRING"},
+                                        "item_quantity": {"type": "NUMBER"},
+                                        "item_rate": {"type": "NUMBER"},
+                                        "item_amount": {"type": "NUMBER"}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
-)
 
+    for model_name in models_to_try:
+        try:
+            logger.info(f"Attempting model: {model_name}...")
+            model = genai.GenerativeModel(model_name, generation_config=generation_config)
+            response = model.generate_content([file_ref, prompt])
+            return response 
+        except Exception as e:
+            logger.error(f"Model {model_name} failed: {e}")
+            continue 
+    
+    raise Exception("All models failed.")
 
-# -----------------------------
-# Health check
-# -----------------------------
+# --- 4. API ENDPOINT ---
 @app.get("/")
-def root():
-    return {"status": "up"}
+def health_check(): return {"status": "online", "service": "BFHL Invoice Extractor"}
 
-
-# -----------------------------
-# Main endpoint
-# -----------------------------
 @app.post("/extract-bill-data")
-def extract_bill_data(req: InvoiceRequest):
-    filename = None
+async def extract_bill_data(request: InvoiceRequest):
+    # DYNAMIC EXTENSION HANDLING (Essential for the training samples you shared)
+    file_ext = ".jpg"
+    if ".pdf" in request.document.lower(): file_ext = ".pdf"
+    elif ".png" in request.document.lower(): file_ext = ".png"
+    
+    temp_filename = f"temp_invoice{file_ext}"
+    
     try:
-        url = extract_url(req.document)
-        filename = download_file(url)
+        logger.info(f"Downloading {request.document}")
+        # Browser headers to bypass 403 blocks on Azure links
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': '*/*',
+            'Connection': 'keep-alive'
+        }
+        response = requests.get(request.document, headers=headers, stream=True, timeout=20)
+        if response.status_code != 200:
+            raise HTTPException(status_code=400, detail=f"Download failed: Status {response.status_code}")
+            
+        with open(temp_filename, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                f.write(chunk)
+                
+        # Fraud Check (Safe for PDFs)
+        fraud_data = detect_fraud_advanced(temp_filename)
 
-        file_ref = genai.upload_file(filename)
-
+        # Gemini Extraction
+        file_ref = genai.upload_file(temp_filename)
+        
+        # PROMPT: Explicitly tuned for strict accounting
         prompt = """
-Extract bill items exactly in this format:
-{
-  "pagewise_line_items": [
-    {
-      "page_number": 1,
-      "items": [
-        {
-          "item_name": "string",
-          "item_amount": number,
-          "item_rate": number,
-          "item_quantity": number
-        }
-      ]
-    }
-  ]
-}
-Rules:
-- Only chargeable line items
-- No totals / subtotals / taxes
-- If quantity missing → 1
-- If only amount shown → quantity=1, rate=amount
-Return valid JSON only.
-"""
+        Extract the invoice line items strictly.
+        1. Classify the page_type as 'Bill Detail', 'Final Bill', or 'Pharmacy'.
+        2. Extract item_name, item_quantity, item_rate, item_amount.
+        3. If Quantity is missing but Amount exists, default Qty to 1.
+        Ignore 'Total' rows at the bottom.
+        """
+        
+        gemini_resp = call_gemini_safe(file_ref, prompt)
+        
+        # Parse Response
+        try:
+            raw_data = json.loads(gemini_resp.text)
+        except:
+            raw_data = {"pagewise_line_items": []}
+            
+        # Token Usage (Required by HackRx)
+        try:
+            usage = gemini_resp.usage_metadata
+            token_data = {
+                "total_tokens": usage.total_token_count,
+                "input_tokens": usage.prompt_token_count,
+                "output_tokens": usage.candidates_token_count
+            }
+        except:
+            token_data = {"total_tokens": 0, "input_tokens": 0, "output_tokens": 0}
 
-        resp = model.generate_content([file_ref, prompt])
-        data = json.loads(resp.text)
-        pages_raw = data.get("pagewise_line_items", [])
-
-        # Convert to required Datathon schema
-        pages_final = []
-        total_items = 0
-
-        for p in pages_raw:
-            pn = str(p.get("page_number", 1))
-            items = p.get("items", [])
-            clean_items = []
-
-            for it in items:
-                clean_items.append({
-                    "item_name": it.get("item_name", "").strip(),
-                    "item_amount": f(it.get("item_amount")),
-                    "item_rate": f(it.get("item_rate")),
-                    "item_quantity": f(it.get("item_quantity")),
-                })
-            total_items += len(clean_items)
-
-            pages_final.append({
-                "page_no": pn,
-                "page_type": "Bill Detail",
-                "bill_items": clean_items
-            })
-
-        usage = getattr(resp, "usage_metadata", None)
-        token_usage = {
-            "total_tokens": getattr(usage, "total_token_count", 0) if usage else 0,
-            "input_tokens": getattr(usage, "prompt_token_count", 0) if usage else 0,
-            "output_tokens": getattr(usage, "candidates_token_count", 0) if usage else 0
-        }
-
+        # Logic Engine (The Accountant)
+        clean_data = verify_and_reconcile(raw_data)
+        
         return {
             "is_success": True,
-            "token_usage": token_usage,
+            "token_usage": token_data,
             "data": {
-                "pagewise_line_items": pages_final,
-                "total_item_count": total_items,
-            },
+                "pagewise_line_items": clean_data["pagewise_line_items"],
+                "total_item_count": clean_data["total_item_count"],
+                "reconciled_amount": clean_data["reconciled_amount"]
+            }
         }
 
-    except HTTPException:
-        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Final Error: {e}")
+        return {
+            "is_success": False,
+            "token_usage": {"total_tokens": 0},
+            "data": {"pagewise_line_items": [], "total_item_count": 0, "reconciled_amount": 0.0}
+        }
     finally:
-        if filename and os.path.exists(filename):
-            os.remove(filename)
-
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
+        if os.path.exists(temp_filename): os.remove(temp_filename)
+        if os.path.exists("temp_ela.jpg"): os.remove("temp_ela.jpg")
+            
