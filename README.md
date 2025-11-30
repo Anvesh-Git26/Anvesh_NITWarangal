@@ -1,28 +1,29 @@
 # 🚀 Neuro-Symbolic Invoice Extractor (BFHL Datathon)
 
 ## 📌 Overview
-This solution implements a **Neuro-Symbolic Architecture** to extract structured data from medical invoices with 100% mathematical consistency. It combines **Gemini 1.5 Flash (Vision)** for extraction with a deterministic **Python Logic Engine** to verify and self-correct values.
+This solution implements a **Neuro-Symbolic Architecture** to extract structured data from complex medical invoices with mathematical precision. It combines state-of-the-art **Multimodal AI (Gemini 2.0 Flash)** for visual extraction with a deterministic **Python Logic Engine** to verify, audit, and self-correct the data before submission.
 
 ## ⚡ Key Differentiators
-1.  **Forensic Fraud Detection:** Uses **Error Level Analysis (ELA)** to detect digital tampering (whitener/font edits) on the invoice.
-2.  **Self-Healing Math:** Automatically corrects OCR hallucinations by enforcing `Qty × Rate = Amount`.
-3.  **Logic Trap Handling:**
-    * **Column Swaps:** Detects and fixes swapped Rate/Amount columns.
-    * **Ghost Headers:** Filters out category headers to prevent double-counting.
-    * **Lump Sums:** Normalizes items with missing unit prices.
+1.  **Forensic Fraud Detection:** Implements **Error Level Analysis (ELA)** to detect digital tampering (e.g., whitener, font injection) by analyzing JPEG compression artifacts.
+2.  **Self-Healing Mathematical Core:** Automatically corrects OCR hallucinations by enforcing the constraint `Qty × Rate = Amount`. If the AI misreads a number, the math engine fixes it.
+3.  **Advanced Logic Trap Handling:**
+    * **Column Swaps:** Automatically detects and fixes swapped "Rate" and "Amount" columns (common in clinic bills).
+    * **Ghost Header Filtering:** intelligently filters out category headers (e.g., "Room Charges") to prevent double-counting of line items.
+    * **Lump Sum Normalization:** Handles items with missing unit prices by inferring `Qty=1`.
+4.  **Financial Taxonomy:** Classifies rows into `ITEM`, `TAX`, `DISCOUNT`, and `ADJUSTMENT` to ensure the final reconciled total is accurate ($Items + Tax - Discount$).
 
 ## 🛠️ Tech Stack
-* **Framework:** FastAPI (Python)
-* **AI Model:** Gemini 1.5 Flash
-* **Forensics:** OpenCV (Headless)
-* **Hosting:** Render (Cloud)
+* **Framework:** FastAPI (Python 3.13)
+* **AI Model:** Google Gemini 2.0 Flash (with robust fallback to 2.5/Pro)
+* **Forensics:** OpenCV (Headless) with Numpy
+* **Deployment:** Dockerized container on Render (Cloud)
 
-## 🔗 API Endpoint
+## 🔗 Live API Endpoint
 **Method:** `POST`
 **URL:** `https://anvesh-nitwarangal.onrender.com/extract-bill-data`
 
-**Request Body:**
+### **Request Format**
 ```json
 {
-  "document": "IMAGE_URL_HERE"
+  "document": "[https://example.com/invoice_image.jpg](https://example.com/invoice_image.jpg)"
 }
